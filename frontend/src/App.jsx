@@ -22,6 +22,7 @@ const icons = {
   withdraw: "M21 12H3 M12 3l-9 9 9 9",
   wallet: "M21 12V7H5a2 2 0 010-4h14v4 M3 5v14a2 2 0 002 2h16v-5 M18 12a2 2 0 000 4h4v-4z",
   profile: "M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2 M12 11a4 4 0 100-8 4 4 0 000 8z",
+  expense: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z",
 };
 
 const css = `
@@ -151,6 +152,7 @@ const css = `
   .tx-investment { background: rgba(0,212,255,0.1); color: var(--accent); }
   .tx-earning { background: rgba(0,255,136,0.1); color: var(--accent2); }
   .tx-withdrawal { background: rgba(255,107,53,0.1); color: var(--accent3); }
+  .tx-expense { background: rgba(255,68,102,0.1); color: var(--danger); }
   .tx-business_created { background: rgba(255,215,0,0.1); color: var(--gold); }
   .tx-default { background: rgba(255,255,255,0.05); color: var(--text2); }
 
@@ -290,6 +292,12 @@ function DashboardPage() {
           <div className="stat-label">Guadagni Totali</div>
           <div className="stat-value" style={{ color: 'var(--accent2)' }}>{fmt(total_earnings)}</div>
           <div className="stat-sub">guadagnati finora</div>
+        </div>
+        <div className="stat-card" style={{ '--card-glow': 'rgba(255,68,102,0.06)', '--card-icon-bg': 'rgba(255,68,102,0.1)', '--card-icon-color': 'var(--danger)' }}>
+          <div className="stat-icon"><Icon d={icons.expense} /></div>
+          <div className="stat-label">Spese Totali</div>
+          <div className="stat-value" style={{ color: 'var(--danger)' }}>{fmt(stats.total_expenses || 0)}</div>
+          <div className="stat-sub">spese registrate</div>
         </div>
         <div className="stat-card" style={{ '--card-glow': 'rgba(255,107,53,0.08)', '--card-icon-bg': 'rgba(255,107,53,0.1)', '--card-icon-color': 'var(--accent3)' }}>
           <div className="stat-icon"><Icon d={icons.business} /></div>
@@ -781,7 +789,7 @@ function TransactionsPage() {
   useEffect(() => { api.getTransactions().then(setTxs).finally(() => setLoading(false)); }, []);
   if (loading) return <div className="loading"><div className="spinner" /></div>;
 
-  const typeMap = { investment: { label: '💸 investimento', cls: 'tx-investment' }, earning: { label: '⚡ guadagno', cls: 'tx-earning' }, withdrawal: { label: '🏧 prelievo', cls: 'tx-withdrawal' }, business_created: { label: '🏢 creazione', cls: 'tx-business_created' } };
+  const typeMap = { investment: { label: '💸 investimento', cls: 'tx-investment' }, earning: { label: '⚡ guadagno', cls: 'tx-earning' }, expense: { label: '💸 spesa', cls: 'tx-expense' }, withdrawal: { label: '🏧 prelievo', cls: 'tx-withdrawal' }, business_created: { label: '🏢 creazione', cls: 'tx-business_created' } };
 
   return (
     <>
@@ -812,6 +820,141 @@ function TransactionsPage() {
   );
 }
 
+
+
+// ─── EXPENSES PAGE ────────────────────────────────────────────────────────────
+function ExpensesPage() {
+  const { user } = useAuth();
+  const [expenses, setExpenses] = useState([]);
+  const [businesses, setBusinesses] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [form, setForm] = useState({ business_id: '', total_amount: '', description: '', note: '' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [preview, setPreview] = useState(null);
+
+  const refresh = useCallback(async () => {
+    const [e, b] = await Promise.all([api.getExpenses(), api.getBusinesses()]);
+    setExpenses(e); setBusinesses(b); setLoading(false);
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleAdd = async () => {
+    if (!form.business_id || !form.total_amount || !form.description) return setError('Business, importo e descrizione obbligatori');
+    setSaving(true); setError('');
+    try { await api.addExpense(form); setShowModal(false); setForm({ business_id: '', total_amount: '', description: '', note: '' }); setPreview(null); refresh(); }
+    catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm('Eliminare questa spesa?')) return;
+    await api.deleteExpense(id); refresh();
+  };
+
+  const calcPreview = async (business_id, amount) => {
+    if (!business_id || !amount) { setPreview(null); return; }
+    try {
+      const investments = await api.getInvestments();
+      const bizInv = investments.filter(i => String(i.business_id) === String(business_id));
+      const total = bizInv.reduce((s, i) => s + Number(i.amount), 0);
+      if (total === 0) { setPreview([]); return; }
+      const grouped = {};
+      bizInv.forEach(i => { grouped[i.username] = (grouped[i.username] || 0) + Number(i.amount); });
+      setPreview(Object.entries(grouped).map(([name, inv]) => ({ name, pct: (inv / total * 100).toFixed(1), share: (inv / total * amount).toFixed(2) })));
+    } catch { setPreview(null); }
+  };
+
+  // Totale spese per business
+  const expensesByBiz = expenses.reduce((acc, e) => {
+    acc[e.business_name] = (acc[e.business_name] || 0) + Number(e.total_amount);
+    return acc;
+  }, {});
+
+  if (loading) return <div className="loading"><div className="spinner" /></div>;
+
+  return (
+    <>
+      <div className="page-header">
+        <div className="page-header-text"><h1>💸 Spese</h1><p>Spese delle attività divise proporzionalmente</p></div>
+        {user.role === 'admin' && <button className="btn btn-danger" onClick={() => { setShowModal(true); setError(''); setPreview(null); }}><Icon d={icons.plus} size={16} /> Registra Spesa</button>}
+      </div>
+
+      {/* Riepilogo spese per business */}
+      {Object.keys(expensesByBiz).length > 0 && (
+        <div className="stats-grid" style={{ marginBottom: 24 }}>
+          {Object.entries(expensesByBiz).map(([name, total]) => {
+            const biz = businesses.find(b => b.name === name);
+            return (
+              <div className="stat-card" key={name} style={{ '--card-glow': 'rgba(255,68,102,0.06)', '--card-icon-bg': 'rgba(255,68,102,0.1)', '--card-icon-color': 'var(--danger)' }}>
+                <div className="stat-icon" style={{ fontSize: 18 }}>{biz?.icon || '🏢'}</div>
+                <div className="stat-label">{name}</div>
+                <div className="stat-value" style={{ color: 'var(--danger)', fontSize: 22 }}>{fmtDec(total)}</div>
+                <div className="stat-sub">spese totali</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-header"><div className="card-title">📋 Storico Spese</div><div className="card-subtitle">{expenses.length} spese registrate</div></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Attività</th><th>Descrizione</th><th>Totale</th><th>Nota</th><th>Data</th>{user.role === 'admin' && <th></th>}</tr></thead>
+            <tbody>
+              {expenses.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text2)', padding: 40 }}>Nessuna spesa registrata</td></tr>}
+              {expenses.map(e => (
+                <tr key={e.id}>
+                  <td><span style={{ marginRight: 6 }}>{e.business_icon}</span><strong>{e.business_name}</strong></td>
+                  <td style={{ fontWeight: 600 }}>{e.description}</td>
+                  <td><span className="money-neg">{fmtDec(e.total_amount)}</span></td>
+                  <td style={{ color: 'var(--text2)', fontSize: 12 }}>{e.note || '—'}</td>
+                  <td style={{ color: 'var(--text2)', fontSize: 12, fontFamily: 'var(--mono)' }}>{fmtDate(e.created_at)}</td>
+                  {user.role === 'admin' && <td><button className="btn btn-danger btn-sm" onClick={() => handleDelete(e.id)}><Icon d={icons.trash} size={13} /></button></td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {showModal && (
+        <Modal title="💸 Registra Spesa" onClose={() => { setShowModal(false); setPreview(null); }}
+          footer={<><button className="btn btn-secondary" onClick={() => { setShowModal(false); setPreview(null); }}>Annulla</button><button className="btn btn-primary" style={{ width: 'auto' }} onClick={handleAdd} disabled={saving}>{saving ? '...' : 'Registra'}</button></>}>
+          {error && <div className="error-msg">{error}</div>}
+          <div className="form-group"><label className="form-label">Attività</label>
+            <select className="form-input form-select" value={form.business_id} onChange={e => { setForm(f => ({ ...f, business_id: e.target.value })); calcPreview(e.target.value, form.total_amount); }}>
+              <option value="">Seleziona attività...</option>{businesses.map(b => <option key={b.id} value={b.id}>{b.icon} {b.name}</option>)}
+            </select></div>
+          <div className="form-group"><label className="form-label">Descrizione spesa</label>
+            <input className="form-input" placeholder="es. Rifornimento, Riparazione, Tangente..." value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} /></div>
+          <div className="form-group"><label className="form-label">Importo Totale ($)</label>
+            <div className="amount-input-wrap"><span className="currency" style={{ color: 'var(--danger)' }}>$</span>
+              <input className="form-input" type="number" step="0.01" placeholder="0.00" value={form.total_amount}
+                onChange={e => { setForm(f => ({ ...f, total_amount: e.target.value })); calcPreview(form.business_id, e.target.value); }} />
+            </div></div>
+          <div className="form-group"><label className="form-label">Nota (opzionale)</label>
+            <input className="form-input" placeholder="Dettagli aggiuntivi..." value={form.note} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} /></div>
+
+          {preview !== null && (
+            <div style={{ background: 'rgba(255,68,102,0.05)', border: '1px solid rgba(255,68,102,0.2)', borderRadius: 10, padding: 16, marginTop: 8 }}>
+              <div style={{ fontSize: 12, color: 'var(--danger)', fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', fontFamily: 'var(--mono)', marginBottom: 10 }}>💸 Divisione spesa</div>
+              {preview.length === 0 ? <p style={{ color: 'var(--danger)', fontSize: 13 }}>Nessun investitore</p> :
+                preview.map(p => (
+                  <div key={p.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid rgba(255,68,102,0.15)', fontSize: 13 }}>
+                    <span style={{ fontWeight: 600 }}>{p.name} <span style={{ color: 'var(--text2)', fontSize: 11 }}>({p.pct}%)</span></span>
+                    <span className="money-neg">-{fmtDec(p.share)}</span>
+                  </div>
+                ))}
+            </div>
+          )}
+        </Modal>
+      )}
+    </>
+  );
+}
 
 // ─── MY PROFILE PAGE ──────────────────────────────────────────────────────────
 function MyProfilePage() {
@@ -848,6 +991,12 @@ function MyProfilePage() {
           <div className="stat-value" style={{ color: 'var(--accent2)' }}>{fmtDec(totals.total_earned)}</div>
           <div className="stat-sub">guadagni accumulati</div>
         </div>
+        <div className="stat-card" style={{ '--card-glow': 'rgba(255,68,102,0.08)', '--card-icon-bg': 'rgba(255,68,102,0.1)', '--card-icon-color': 'var(--danger)' }}>
+          <div className="stat-icon"><Icon d={icons.expense} /></div>
+          <div className="stat-label">Spese</div>
+          <div className="stat-value" style={{ color: 'var(--danger)' }}>{fmtDec(totals.total_expenses || 0)}</div>
+          <div className="stat-sub">spese addebitate</div>
+        </div>
         <div className="stat-card" style={{ '--card-glow': 'rgba(255,107,53,0.08)', '--card-icon-bg': 'rgba(255,107,53,0.1)', '--card-icon-color': 'var(--accent3)' }}>
           <div className="stat-icon"><Icon d={icons.withdraw} /></div>
           <div className="stat-label">Ritirato</div>
@@ -858,7 +1007,7 @@ function MyProfilePage() {
           <div className="stat-icon"><Icon d={icons.wallet} /></div>
           <div className="stat-label">Disponibile</div>
           <div className="stat-value" style={{ color: 'var(--gold)' }}>{fmtDec(totals.available_balance)}</div>
-          <div className="stat-sub">da ritirare</div>
+          <div className="stat-sub">guadagni - spese - prelievi</div>
         </div>
       </div>
 
@@ -939,6 +1088,29 @@ function MyProfilePage() {
         </div>
       </div>
 
+      {/* Le mie spese */}
+      {data.expense_shares && data.expense_shares.length > 0 && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <div className="card-header"><div className="card-title">💸 La Mia Parte delle Spese</div><div className="card-subtitle">{data.expense_shares.length} spese addebitate</div></div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Attività</th><th>Descrizione</th><th>Mia Quota</th><th>% Share</th><th>Data</th></tr></thead>
+              <tbody>
+                {data.expense_shares.map(e => (
+                  <tr key={e.id}>
+                    <td><span style={{ marginRight: 6 }}>{e.business_icon}</span>{e.business_name}</td>
+                    <td style={{ fontWeight: 600 }}>{e.expense_description}</td>
+                    <td><span className="money-neg">-{fmtDec(e.amount)}</span></td>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--danger)' }}>{Number(e.share_percent).toFixed(1)}%</td>
+                    <td style={{ color: 'var(--text2)', fontSize: 12, fontFamily: 'var(--mono)' }}>{fmtDate(e.expense_date)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* I miei guadagni */}
       <div className="card">
         <div className="card-header"><div className="card-title">⚡ La Mia Parte dei Guadagni</div><div className="card-subtitle">{earning_shares.length} distribuzioni ricevute</div></div>
@@ -974,6 +1146,7 @@ function Sidebar({ page, setPage }) {
     { id: 'businesses', icon: icons.business, label: 'Attività' },
     { id: 'investments', icon: icons.invest, label: 'Investimenti' },
     { id: 'earnings', icon: icons.earn, label: 'Guadagni' },
+    { id: 'expenses', icon: icons.expense, label: 'Spese' },
     { id: 'withdrawals', icon: icons.withdraw, label: 'Prelievi' },
     { id: 'members', icon: icons.users, label: 'Membri' },
     { id: 'transactions', icon: icons.history, label: 'Storico' },
@@ -1001,7 +1174,7 @@ function AppInner() {
   if (loading) return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}><div className="spinner" /></div>;
   if (!user) return <AuthPage />;
 
-  const pages = { dashboard: <DashboardPage />, myprofile: <MyProfilePage />, businesses: <BusinessesPage />, investments: <InvestmentsPage />, earnings: <EarningsPage />, withdrawals: <WithdrawalsPage />, members: <MembersPage />, transactions: <TransactionsPage /> };
+  const pages = { dashboard: <DashboardPage />, myprofile: <MyProfilePage />, businesses: <BusinessesPage />, investments: <InvestmentsPage />, earnings: <EarningsPage />, expenses: <ExpensesPage />, withdrawals: <WithdrawalsPage />, members: <MembersPage />, transactions: <TransactionsPage /> };
 
   return (
     <div className="app-layout">

@@ -84,6 +84,26 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+      total_amount NUMERIC(12,2) NOT NULL,
+      description TEXT NOT NULL,
+      note TEXT,
+      recorded_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS expense_shares (
+      id SERIAL PRIMARY KEY,
+      expense_id INTEGER REFERENCES expenses(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+      amount NUMERIC(12,2) NOT NULL,
+      share_percent NUMERIC(6,2) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
       business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
@@ -355,21 +375,19 @@ app.get('/api/stats', auth, async (req, res) => {
     FROM investments i JOIN businesses b ON b.id = i.business_id WHERE b.active = true
   `);
   const totalEarnings = await pool.query(`SELECT COALESCE(SUM(total_amount), 0) as total FROM earnings`);
+  const totalExpenses = await pool.query(`SELECT COALESCE(SUM(total_amount), 0) as total FROM expenses`);
 
-  // Saldo per utente per business (guadagnato - ritirato)
+  // Saldo per utente per business (guadagnato - spese - ritirato)
   const userBalances = await pool.query(`
     SELECT 
       u.id as user_id, u.username,
       b.id as business_id, b.name as business_name, b.icon,
       COALESCE(SUM(es.amount), 0) as total_earned,
-      COALESCE((
-        SELECT SUM(w.amount) FROM withdrawals w 
-        WHERE w.user_id = u.id AND w.business_id = b.id
-      ), 0) as total_withdrawn,
-      COALESCE(SUM(es.amount), 0) - COALESCE((
-        SELECT SUM(w.amount) FROM withdrawals w 
-        WHERE w.user_id = u.id AND w.business_id = b.id
-      ), 0) as available_balance
+      COALESCE((SELECT SUM(xs.amount) FROM expense_shares xs WHERE xs.user_id = u.id AND xs.business_id = b.id), 0) as total_expenses,
+      COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id = u.id AND w.business_id = b.id), 0) as total_withdrawn,
+      COALESCE(SUM(es.amount), 0)
+        - COALESCE((SELECT SUM(xs.amount) FROM expense_shares xs WHERE xs.user_id = u.id AND xs.business_id = b.id), 0)
+        - COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id = u.id AND w.business_id = b.id), 0) as available_balance
     FROM users u
     JOIN earning_shares es ON es.user_id = u.id
     JOIN businesses b ON b.id = es.business_id
@@ -381,13 +399,15 @@ app.get('/api/stats', auth, async (req, res) => {
   const userTotals = await pool.query(`
     SELECT 
       u.id, u.username,
-      COALESCE(SUM(i.amount), 0) as total_invested,
-      COALESCE(SUM(es.amount), 0) as total_earned,
+      COALESCE(SUM(DISTINCT i.amount), 0) as total_invested,
+      COALESCE((SELECT SUM(es2.amount) FROM earning_shares es2 WHERE es2.user_id = u.id), 0) as total_earned,
+      COALESCE((SELECT SUM(xs.amount) FROM expense_shares xs WHERE xs.user_id = u.id), 0) as total_expenses,
       COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id = u.id), 0) as total_withdrawn,
-      COALESCE(SUM(es.amount), 0) - COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id = u.id), 0) as available_balance
+      COALESCE((SELECT SUM(es2.amount) FROM earning_shares es2 WHERE es2.user_id = u.id), 0)
+        - COALESCE((SELECT SUM(xs.amount) FROM expense_shares xs WHERE xs.user_id = u.id), 0)
+        - COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id = u.id), 0) as available_balance
     FROM users u
     LEFT JOIN investments i ON i.user_id = u.id
-    LEFT JOIN earning_shares es ON es.user_id = u.id
     GROUP BY u.id, u.username
     ORDER BY total_invested DESC
   `);
@@ -401,6 +421,7 @@ app.get('/api/stats', auth, async (req, res) => {
   res.json({
     totals: totals.rows[0],
     total_earnings: totalEarnings.rows[0].total,
+    total_expenses: totalExpenses.rows[0].total,
     user_balances: maskStatRows(userBalances.rows),
     user_totals: maskStatRows(userTotals.rows)
   });
@@ -416,6 +437,60 @@ app.get('/api/transactions', auth, async (req, res) => {
     ORDER BY t.created_at DESC LIMIT 200
   `);
   res.json(maskRows(rows, req.user));
+});
+
+// ─── EXPENSES ────────────────────────────────────────────────────────────────
+app.get('/api/expenses', auth, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT e.*, b.name as business_name, b.icon as business_icon, u.username as recorded_by_name
+    FROM expenses e
+    JOIN businesses b ON b.id = e.business_id
+    LEFT JOIN users u ON u.id = e.recorded_by
+    ORDER BY e.created_at DESC
+  `);
+  res.json(rows.map(r => ({
+    ...r,
+    recorded_by_name: req.user.role === 'admin' ? r.recorded_by_name : null
+  })));
+});
+
+app.post('/api/expenses', auth, adminOnly, async (req, res) => {
+  const { business_id, total_amount, description, note } = req.body;
+  if (!business_id || !total_amount || !description) return res.status(400).json({ error: 'business_id, total_amount e description richiesti' });
+
+  const { rows: investors } = await pool.query(`
+    SELECT user_id, SUM(amount) as invested,
+      SUM(amount) / (SELECT SUM(amount) FROM investments WHERE business_id = $1) * 100 as share_percent
+    FROM investments WHERE business_id = $1
+    GROUP BY user_id
+  `, [business_id]);
+
+  if (investors.length === 0) return res.status(400).json({ error: 'Nessun investitore per questa attività' });
+
+  const { rows: [expense] } = await pool.query(
+    'INSERT INTO expenses (business_id, total_amount, description, note, recorded_by) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    [business_id, total_amount, description, note || '', req.user.id]
+  );
+
+  for (const inv of investors) {
+    const share = (Number(inv.share_percent) / 100) * Number(total_amount);
+    await pool.query(
+      'INSERT INTO expense_shares (expense_id, user_id, business_id, amount, share_percent) VALUES ($1, $2, $3, $4, $5)',
+      [expense.id, inv.user_id, business_id, share.toFixed(2), inv.share_percent]
+    );
+  }
+
+  const bizRow = await pool.query('SELECT name FROM businesses WHERE id=$1', [business_id]);
+  await pool.query('INSERT INTO transactions (business_id, user_id, type, amount, description) VALUES ($1, $2, $3, $4, $5)',
+    [business_id, req.user.id, 'expense', total_amount, `Spesa "${description}" $${total_amount} per ${bizRow.rows[0].name}`]);
+
+  res.json(expense);
+});
+
+app.delete('/api/expenses/:id', auth, adminOnly, async (req, res) => {
+  await pool.query('DELETE FROM expense_shares WHERE expense_id=$1', [req.params.id]);
+  await pool.query('DELETE FROM expenses WHERE id=$1', [req.params.id]);
+  res.json({ success: true });
 });
 
 // ─── MY PROFILE ──────────────────────────────────────────────────────────────
@@ -443,6 +518,17 @@ app.get('/api/me/stats', auth, async (req, res) => {
     ORDER BY e.created_at DESC
   `, [uid]);
 
+  // Quote spese per business
+  const expenseShares = await pool.query(`
+    SELECT es.*, e.description as expense_description, e.note as expense_note, e.created_at as expense_date,
+      b.name as business_name, b.icon as business_icon
+    FROM expense_shares es
+    JOIN expenses e ON e.id = es.expense_id
+    JOIN businesses b ON b.id = es.business_id
+    WHERE es.user_id = $1
+    ORDER BY e.created_at DESC
+  `, [uid]);
+
   // Prelievi
   const withdrawals = await pool.query(`
     SELECT w.*, b.name as business_name, b.icon as business_icon
@@ -465,23 +551,26 @@ app.get('/api/me/stats', auth, async (req, res) => {
     LEFT JOIN (SELECT business_id, SUM(amount) as invested FROM investments WHERE user_id=$1 GROUP BY business_id) inv ON inv.business_id = b.id
     LEFT JOIN (SELECT business_id, SUM(amount) as total_earned FROM earning_shares WHERE user_id=$1 GROUP BY business_id) earned ON earned.business_id = b.id
     LEFT JOIN (SELECT business_id, SUM(amount) as total_withdrawn FROM withdrawals WHERE user_id=$1 GROUP BY business_id) withdrawn ON withdrawn.business_id = b.id
+    LEFT JOIN (SELECT business_id, SUM(amount) as total_expenses FROM expense_shares WHERE user_id=$1 GROUP BY business_id) myexp ON myexp.business_id = b.id
     LEFT JOIN (SELECT business_id, SUM(amount) as total FROM investments GROUP BY business_id) biz_total ON biz_total.business_id = b.id
     WHERE b.active = true AND inv.invested IS NOT NULL
     ORDER BY b.name
   `, [uid]);
 
-  // Totali aggregati
   const totals = {
     total_invested: investments.rows.reduce((s, r) => s + Number(r.amount), 0),
     total_earned: earningShares.rows.reduce((s, r) => s + Number(r.amount), 0),
+    total_expenses: expenseShares.rows.reduce((s, r) => s + Number(r.amount), 0),
     total_withdrawn: withdrawals.rows.reduce((s, r) => s + Number(r.amount), 0),
   };
-  totals.available_balance = totals.total_earned - totals.total_withdrawn;
+  totals.net_earnings = totals.total_earned - totals.total_expenses;
+  totals.available_balance = totals.net_earnings - totals.total_withdrawn;
 
   res.json({
     totals,
     investments: investments.rows,
     earning_shares: earningShares.rows,
+    expense_shares: expenseShares.rows,
     withdrawals: withdrawals.rows,
     balances: balances.rows,
   });

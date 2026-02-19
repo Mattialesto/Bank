@@ -35,6 +35,11 @@ export const api = {
   deleteInvestment: (id) => req(`/investments/${id}`, { method: 'DELETE' }),
 
   getEarnings: () => req('/earnings'),
+
+  getExpenses: () => req('/expenses'),
+  addExpense: (body) => req('/expenses', { method: 'POST', body: JSON.stringify(body) }),
+  deleteExpense: (id) => req(`/expenses/${id}`, { method: 'DELETE' }),
+
   addEarning: (body) => req('/earnings', { method: 'POST', body: JSON.stringify(body) }),
   deleteEarning: (id) => req(`/earnings/${id}`, { method: 'DELETE' }),
 
