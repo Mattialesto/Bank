@@ -112,6 +112,20 @@ function adminOnly(req, res, next) {
   next();
 }
 
+// Censura il nome: prima lettera + asterischi, tranne per se stesso o per admin
+function maskName(username, requestingUserId, ownerId, isAdmin) {
+  if (isAdmin || requestingUserId === ownerId || !username) return username;
+  return username[0].toUpperCase() + '*'.repeat(Math.max(username.length - 1, 3));
+}
+
+function maskRows(rows, requestingUser, userIdField = 'user_id', usernameField = 'username') {
+  if (requestingUser.role === 'admin') return rows;
+  return rows.map(row => ({
+    ...row,
+    [usernameField]: maskName(row[usernameField], requestingUser.id, row[userIdField], false)
+  }));
+}
+
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 app.post('/api/auth/register', async (req, res) => {
   const { username, password, adminSecret } = req.body;
@@ -151,7 +165,8 @@ app.get('/api/users', auth, async (req, res) => {
     LEFT JOIN investments i ON i.user_id = u.id
     GROUP BY u.id ORDER BY total_invested DESC
   `);
-  res.json(rows);
+  const masked = maskRows(rows, req.user, 'id', 'username');
+  res.json(masked);
 });
 
 // ─── BUSINESSES ───────────────────────────────────────────────────────────────
@@ -200,7 +215,7 @@ app.get('/api/investments', auth, async (req, res) => {
     JOIN businesses b ON b.id = i.business_id
     ORDER BY i.created_at DESC
   `);
-  res.json(rows);
+  res.json(maskRows(rows, req.user));
 });
 
 app.post('/api/investments', auth, adminOnly, async (req, res) => {
@@ -235,7 +250,11 @@ app.get('/api/earnings', auth, async (req, res) => {
     LEFT JOIN users u ON u.id = e.recorded_by
     ORDER BY e.created_at DESC
   `);
-  res.json(rows);
+  // recorded_by_name: mostra solo ad admin (chi ha registrato non è info sensibile ma manteniamo coerenza)
+  res.json(rows.map(r => ({
+    ...r,
+    recorded_by_name: req.user.role === 'admin' ? r.recorded_by_name : (r.recorded_by === req.user.id ? r.recorded_by_name : null)
+  })));
 });
 
 app.post('/api/earnings', auth, adminOnly, async (req, res) => {
@@ -291,7 +310,7 @@ app.get('/api/withdrawals', auth, async (req, res) => {
     LEFT JOIN users rb ON rb.id = w.recorded_by
     ORDER BY w.created_at DESC
   `);
-  res.json(rows);
+  res.json(maskRows(rows, req.user));
 });
 
 app.post('/api/withdrawals', auth, adminOnly, async (req, res) => {
@@ -373,11 +392,17 @@ app.get('/api/stats', auth, async (req, res) => {
     ORDER BY total_invested DESC
   `);
 
+  const isAdmin = req.user.role === 'admin';
+  const maskStatRows = (rows) => rows.map(r => ({
+    ...r,
+    username: maskName(r.username, req.user.id, r.user_id || r.id, isAdmin)
+  }));
+
   res.json({
     totals: totals.rows[0],
     total_earnings: totalEarnings.rows[0].total,
-    user_balances: userBalances.rows,
-    user_totals: userTotals.rows
+    user_balances: maskStatRows(userBalances.rows),
+    user_totals: maskStatRows(userTotals.rows)
   });
 });
 
@@ -390,7 +415,7 @@ app.get('/api/transactions', auth, async (req, res) => {
     LEFT JOIN businesses b ON b.id = t.business_id
     ORDER BY t.created_at DESC LIMIT 200
   `);
-  res.json(rows);
+  res.json(maskRows(rows, req.user));
 });
 
 // ─── SPA fallback ─────────────────────────────────────────────────────────────
