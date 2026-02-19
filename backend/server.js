@@ -418,6 +418,75 @@ app.get('/api/transactions', auth, async (req, res) => {
   res.json(maskRows(rows, req.user));
 });
 
+// ─── MY PROFILE ──────────────────────────────────────────────────────────────
+// Dati personali dell'utente loggato (nomi altrui non servono, nessuna censura necessaria)
+app.get('/api/me/stats', auth, async (req, res) => {
+  const uid = req.user.id;
+
+  // Investimenti del singolo utente
+  const investments = await pool.query(`
+    SELECT i.*, b.name as business_name, b.icon as business_icon
+    FROM investments i
+    JOIN businesses b ON b.id = i.business_id
+    WHERE i.user_id = $1
+    ORDER BY i.created_at DESC
+  `, [uid]);
+
+  // Quote guadagni per business
+  const earningShares = await pool.query(`
+    SELECT es.*, e.note as earning_note, e.created_at as earning_date,
+      b.name as business_name, b.icon as business_icon
+    FROM earning_shares es
+    JOIN earnings e ON e.id = es.earning_id
+    JOIN businesses b ON b.id = es.business_id
+    WHERE es.user_id = $1
+    ORDER BY e.created_at DESC
+  `, [uid]);
+
+  // Prelievi
+  const withdrawals = await pool.query(`
+    SELECT w.*, b.name as business_name, b.icon as business_icon
+    FROM withdrawals w
+    JOIN businesses b ON b.id = w.business_id
+    WHERE w.user_id = $1
+    ORDER BY w.created_at DESC
+  `, [uid]);
+
+  // Saldo per business
+  const balances = await pool.query(`
+    SELECT 
+      b.id as business_id, b.name as business_name, b.icon,
+      COALESCE(inv.invested, 0) as invested,
+      COALESCE(earned.total_earned, 0) as total_earned,
+      COALESCE(withdrawn.total_withdrawn, 0) as total_withdrawn,
+      COALESCE(earned.total_earned, 0) - COALESCE(withdrawn.total_withdrawn, 0) as available_balance,
+      COALESCE(inv.invested, 0) / NULLIF(biz_total.total, 0) * 100 as share_percent
+    FROM businesses b
+    LEFT JOIN (SELECT business_id, SUM(amount) as invested FROM investments WHERE user_id=$1 GROUP BY business_id) inv ON inv.business_id = b.id
+    LEFT JOIN (SELECT business_id, SUM(amount) as total_earned FROM earning_shares WHERE user_id=$1 GROUP BY business_id) earned ON earned.business_id = b.id
+    LEFT JOIN (SELECT business_id, SUM(amount) as total_withdrawn FROM withdrawals WHERE user_id=$1 GROUP BY business_id) withdrawn ON withdrawn.business_id = b.id
+    LEFT JOIN (SELECT business_id, SUM(amount) as total FROM investments GROUP BY business_id) biz_total ON biz_total.business_id = b.id
+    WHERE b.active = true AND inv.invested IS NOT NULL
+    ORDER BY b.name
+  `, [uid]);
+
+  // Totali aggregati
+  const totals = {
+    total_invested: investments.rows.reduce((s, r) => s + Number(r.amount), 0),
+    total_earned: earningShares.rows.reduce((s, r) => s + Number(r.amount), 0),
+    total_withdrawn: withdrawals.rows.reduce((s, r) => s + Number(r.amount), 0),
+  };
+  totals.available_balance = totals.total_earned - totals.total_withdrawn;
+
+  res.json({
+    totals,
+    investments: investments.rows,
+    earning_shares: earningShares.rows,
+    withdrawals: withdrawals.rows,
+    balances: balances.rows,
+  });
+});
+
 // ─── SPA fallback ─────────────────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(join(frontendPath, 'index.html'));

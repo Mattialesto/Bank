@@ -43,5 +43,6 @@ export const api = {
   deleteWithdrawal: (id) => req(`/withdrawals/${id}`, { method: 'DELETE' }),
 
   getStats: () => req('/stats'),
+  getMyStats: () => req('/me/stats'),
   getTransactions: () => req('/transactions'),
 };

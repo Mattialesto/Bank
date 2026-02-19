@@ -21,6 +21,7 @@ const icons = {
   earn: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
   withdraw: "M21 12H3 M12 3l-9 9 9 9",
   wallet: "M21 12V7H5a2 2 0 010-4h14v4 M3 5v14a2 2 0 002 2h16v-5 M18 12a2 2 0 000 4h4v-4z",
+  profile: "M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2 M12 11a4 4 0 100-8 4 4 0 000 8z",
 };
 
 const css = `
@@ -811,11 +812,165 @@ function TransactionsPage() {
   );
 }
 
+
+// ─── MY PROFILE PAGE ──────────────────────────────────────────────────────────
+function MyProfilePage() {
+  const { user } = useAuth();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => { api.getMyStats().then(setData).finally(() => setLoading(false)); }, []);
+  if (loading) return <div className="loading"><div className="spinner" /></div>;
+  if (!data) return null;
+
+  const { totals, investments, earning_shares, withdrawals, balances } = data;
+
+  return (
+    <>
+      <div className="page-header">
+        <div className="page-header-text">
+          <h1>👤 Il Mio Profilo</h1>
+          <p>I tuoi investimenti, guadagni e prelievi personali</p>
+        </div>
+      </div>
+
+      {/* Stat cards personali */}
+      <div className="stats-grid" style={{ marginBottom: 28 }}>
+        <div className="stat-card" style={{ '--card-glow': 'rgba(0,212,255,0.08)', '--card-icon-bg': 'rgba(0,212,255,0.1)', '--card-icon-color': 'var(--accent)' }}>
+          <div className="stat-icon"><Icon d={icons.invest} /></div>
+          <div className="stat-label">Investito</div>
+          <div className="stat-value" style={{ color: 'var(--accent)' }}>{fmt(totals.total_invested)}</div>
+          <div className="stat-sub">capitale versato</div>
+        </div>
+        <div className="stat-card" style={{ '--card-glow': 'rgba(0,255,136,0.08)', '--card-icon-bg': 'rgba(0,255,136,0.1)', '--card-icon-color': 'var(--accent2)' }}>
+          <div className="stat-icon"><Icon d={icons.earn} /></div>
+          <div className="stat-label">Guadagnato</div>
+          <div className="stat-value" style={{ color: 'var(--accent2)' }}>{fmtDec(totals.total_earned)}</div>
+          <div className="stat-sub">guadagni accumulati</div>
+        </div>
+        <div className="stat-card" style={{ '--card-glow': 'rgba(255,107,53,0.08)', '--card-icon-bg': 'rgba(255,107,53,0.1)', '--card-icon-color': 'var(--accent3)' }}>
+          <div className="stat-icon"><Icon d={icons.withdraw} /></div>
+          <div className="stat-label">Ritirato</div>
+          <div className="stat-value" style={{ color: 'var(--accent3)' }}>{fmtDec(totals.total_withdrawn)}</div>
+          <div className="stat-sub">già prelevato</div>
+        </div>
+        <div className="stat-card" style={{ '--card-glow': 'rgba(255,215,0,0.08)', '--card-icon-bg': 'rgba(255,215,0,0.1)', '--card-icon-color': 'var(--gold)' }}>
+          <div className="stat-icon"><Icon d={icons.wallet} /></div>
+          <div className="stat-label">Disponibile</div>
+          <div className="stat-value" style={{ color: 'var(--gold)' }}>{fmtDec(totals.available_balance)}</div>
+          <div className="stat-sub">da ritirare</div>
+        </div>
+      </div>
+
+      {/* Saldo per business */}
+      {balances.length > 0 && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <div className="card-header"><div className="card-title">🏢 Situazione per Attività</div></div>
+          <div className="balance-grid">
+            {balances.map(b => {
+              const pct = Number(b.total_earned) > 0 ? (Number(b.total_withdrawn) / Number(b.total_earned)) * 100 : 0;
+              const roi = Number(b.invested) > 0 ? (Number(b.total_earned) / Number(b.invested) * 100).toFixed(1) : '0.0';
+              return (
+                <div className="balance-card" key={b.business_id}>
+                  <div className="balance-card-header">
+                    <div style={{ fontSize: 28 }}>{b.icon}</div>
+                    <div>
+                      <div className="balance-card-name">{b.business_name}</div>
+                      <div className="balance-card-biz">quota: {Number(b.share_percent || 0).toFixed(1)}% • ROI {roi}%</div>
+                    </div>
+                  </div>
+                  <div className="balance-row"><label>Investito</label><span className="money">{fmt(b.invested)}</span></div>
+                  <div className="balance-row"><label>Guadagnato</label><span style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--accent2)' }}>{fmtDec(b.total_earned)}</span></div>
+                  <div className="balance-row"><label>Ritirato</label><span className="money-warn">{fmtDec(b.total_withdrawn)}</span></div>
+                  <div className="balance-row"><label>Disponibile</label>
+                    <span className={`balance-available ${Number(b.available_balance) === 0 ? 'zero' : ''}`}>{fmtDec(b.available_balance)}</span>
+                  </div>
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ width: `${Math.min(pct, 100)}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="grid-2">
+        {/* I miei investimenti */}
+        <div className="card">
+          <div className="card-header"><div className="card-title">💵 I Miei Versamenti</div><div className="card-subtitle">{investments.length} versamenti</div></div>
+          {investments.length === 0 ? <div className="empty"><div className="empty-icon">💤</div><p>Nessun versamento</p></div> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Attività</th><th>Importo</th><th>Data</th></tr></thead>
+                <tbody>
+                  {investments.map(i => (
+                    <tr key={i.id}>
+                      <td><span style={{ marginRight: 6 }}>{i.business_icon}</span>{i.business_name}</td>
+                      <td><span className="money">{fmt(i.amount)}</span></td>
+                      <td style={{ color: 'var(--text2)', fontSize: 12, fontFamily: 'var(--mono)' }}>{fmtDate(i.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* I miei prelievi */}
+        <div className="card">
+          <div className="card-header"><div className="card-title">🏧 I Miei Prelievi</div><div className="card-subtitle">{withdrawals.length} prelievi</div></div>
+          {withdrawals.length === 0 ? <div className="empty"><div className="empty-icon">🏧</div><p>Nessun prelievo ancora</p></div> : (
+            <div className="table-wrap">
+              <table>
+                <thead><tr><th>Attività</th><th>Importo</th><th>Data</th></tr></thead>
+                <tbody>
+                  {withdrawals.map(w => (
+                    <tr key={w.id}>
+                      <td><span style={{ marginRight: 6 }}>{w.business_icon}</span>{w.business_name}</td>
+                      <td><span className="money-warn">{fmtDec(w.amount)}</span></td>
+                      <td style={{ color: 'var(--text2)', fontSize: 12, fontFamily: 'var(--mono)' }}>{fmtDate(w.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* I miei guadagni */}
+      <div className="card">
+        <div className="card-header"><div className="card-title">⚡ La Mia Parte dei Guadagni</div><div className="card-subtitle">{earning_shares.length} distribuzioni ricevute</div></div>
+        {earning_shares.length === 0 ? <div className="empty"><div className="empty-icon">📭</div><p>Nessun guadagno distribuito ancora</p></div> : (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Attività</th><th>La Mia Quota</th><th>% Share</th><th>Nota</th><th>Data</th></tr></thead>
+              <tbody>
+                {earning_shares.map(e => (
+                  <tr key={e.id}>
+                    <td><span style={{ marginRight: 6 }}>{e.business_icon}</span>{e.business_name}</td>
+                    <td><span className="money">{fmtDec(e.amount)}</span></td>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--accent)' }}>{Number(e.share_percent).toFixed(1)}%</td>
+                    <td style={{ color: 'var(--text2)', fontSize: 12 }}>{e.earning_note || '—'}</td>
+                    <td style={{ color: 'var(--text2)', fontSize: 12, fontFamily: 'var(--mono)' }}>{fmtDate(e.earning_date)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 function Sidebar({ page, setPage }) {
   const { user, logout } = useAuth();
   const nav = [
     { id: 'dashboard', icon: icons.dashboard, label: 'Dashboard' },
+    { id: 'myprofile', icon: icons.profile, label: 'Il Mio Profilo' },
     { id: 'businesses', icon: icons.business, label: 'Attività' },
     { id: 'investments', icon: icons.invest, label: 'Investimenti' },
     { id: 'earnings', icon: icons.earn, label: 'Guadagni' },
@@ -846,7 +1001,7 @@ function AppInner() {
   if (loading) return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}><div className="spinner" /></div>;
   if (!user) return <AuthPage />;
 
-  const pages = { dashboard: <DashboardPage />, businesses: <BusinessesPage />, investments: <InvestmentsPage />, earnings: <EarningsPage />, withdrawals: <WithdrawalsPage />, members: <MembersPage />, transactions: <TransactionsPage /> };
+  const pages = { dashboard: <DashboardPage />, myprofile: <MyProfilePage />, businesses: <BusinessesPage />, investments: <InvestmentsPage />, earnings: <EarningsPage />, withdrawals: <WithdrawalsPage />, members: <MembersPage />, transactions: <TransactionsPage /> };
 
   return (
     <div className="app-layout">
