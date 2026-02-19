@@ -22,7 +22,6 @@ const pool = new Pool({
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Serve frontend build
 const frontendPath = join(__dirname, '../frontend/dist');
 app.use(express.static(frontendPath));
 
@@ -42,7 +41,6 @@ async function initDB() {
       name VARCHAR(100) NOT NULL,
       description TEXT,
       total_invested NUMERIC(12,2) DEFAULT 0,
-      monthly_revenue NUMERIC(12,2) DEFAULT 0,
       icon VARCHAR(10) DEFAULT '🏢',
       active BOOLEAN DEFAULT true,
       created_at TIMESTAMPTZ DEFAULT NOW()
@@ -57,11 +55,40 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS earnings (
+      id SERIAL PRIMARY KEY,
+      business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+      total_amount NUMERIC(12,2) NOT NULL,
+      note TEXT,
+      recorded_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS earning_shares (
+      id SERIAL PRIMARY KEY,
+      earning_id INTEGER REFERENCES earnings(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+      amount NUMERIC(12,2) NOT NULL,
+      share_percent NUMERIC(6,2) NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS withdrawals (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+      amount NUMERIC(12,2) NOT NULL,
+      note TEXT,
+      recorded_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
       business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
       user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-      type VARCHAR(20) NOT NULL,
+      type VARCHAR(30) NOT NULL,
       amount NUMERIC(12,2) NOT NULL,
       description TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
@@ -77,9 +104,7 @@ function auth(req, res, next) {
   try {
     req.user = jwt.verify(token, process.env.JWT_SECRET || 'secret');
     next();
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
-  }
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
 }
 
 function adminOnly(req, res, next) {
@@ -100,9 +125,7 @@ app.post('/api/auth/register', async (req, res) => {
     );
     const token = jwt.sign({ id: rows[0].id, username: rows[0].username, role: rows[0].role }, process.env.JWT_SECRET || 'secret', { expiresIn: '7d' });
     res.json({ token, user: rows[0] });
-  } catch (e) {
-    res.status(400).json({ error: 'Username già in uso' });
-  }
+  } catch { res.status(400).json({ error: 'Username già in uso' }); }
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -144,10 +167,10 @@ app.get('/api/businesses', auth, async (req, res) => {
 });
 
 app.post('/api/businesses', auth, adminOnly, async (req, res) => {
-  const { name, description, monthly_revenue, icon } = req.body;
+  const { name, description, icon } = req.body;
   const { rows } = await pool.query(
-    'INSERT INTO businesses (name, description, monthly_revenue, icon) VALUES ($1, $2, $3, $4) RETURNING *',
-    [name, description || '', monthly_revenue || 0, icon || '🏢']
+    'INSERT INTO businesses (name, description, icon) VALUES ($1, $2, $3) RETURNING *',
+    [name, description || '', icon || '🏢']
   );
   await pool.query('INSERT INTO transactions (business_id, user_id, type, amount, description) VALUES ($1, $2, $3, $4, $5)',
     [rows[0].id, req.user.id, 'business_created', 0, `Attività "${name}" creata`]);
@@ -155,10 +178,10 @@ app.post('/api/businesses', auth, adminOnly, async (req, res) => {
 });
 
 app.put('/api/businesses/:id', auth, adminOnly, async (req, res) => {
-  const { name, description, monthly_revenue, icon } = req.body;
+  const { name, description, icon } = req.body;
   const { rows } = await pool.query(
-    'UPDATE businesses SET name=$1, description=$2, monthly_revenue=$3, icon=$4 WHERE id=$5 RETURNING *',
-    [name, description, monthly_revenue, icon, req.params.id]
+    'UPDATE businesses SET name=$1, description=$2, icon=$3 WHERE id=$4 RETURNING *',
+    [name, description, icon, req.params.id]
   );
   res.json(rows[0]);
 });
@@ -202,6 +225,108 @@ app.delete('/api/investments/:id', auth, adminOnly, async (req, res) => {
   res.json({ success: true });
 });
 
+// ─── EARNINGS ─────────────────────────────────────────────────────────────────
+// Registra un guadagno e distribuisce le quote agli investitori
+app.get('/api/earnings', auth, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT e.*, b.name as business_name, b.icon as business_icon, u.username as recorded_by_name
+    FROM earnings e
+    JOIN businesses b ON b.id = e.business_id
+    LEFT JOIN users u ON u.id = e.recorded_by
+    ORDER BY e.created_at DESC
+  `);
+  res.json(rows);
+});
+
+app.post('/api/earnings', auth, adminOnly, async (req, res) => {
+  const { business_id, total_amount, note } = req.body;
+  if (!business_id || !total_amount) return res.status(400).json({ error: 'business_id e total_amount richiesti' });
+
+  // Calcola le quote degli investitori per questo business
+  const { rows: investors } = await pool.query(`
+    SELECT user_id, SUM(amount) as invested,
+      SUM(amount) / (SELECT SUM(amount) FROM investments WHERE business_id = $1) * 100 as share_percent
+    FROM investments WHERE business_id = $1
+    GROUP BY user_id
+  `, [business_id]);
+
+  if (investors.length === 0) return res.status(400).json({ error: 'Nessun investitore per questa attività' });
+
+  // Inserisci il guadagno
+  const { rows: [earning] } = await pool.query(
+    'INSERT INTO earnings (business_id, total_amount, note, recorded_by) VALUES ($1, $2, $3, $4) RETURNING *',
+    [business_id, total_amount, note || '', req.user.id]
+  );
+
+  // Distribuisci le quote
+  for (const inv of investors) {
+    const share = (Number(inv.share_percent) / 100) * Number(total_amount);
+    await pool.query(
+      'INSERT INTO earning_shares (earning_id, user_id, business_id, amount, share_percent) VALUES ($1, $2, $3, $4, $5)',
+      [earning.id, inv.user_id, business_id, share.toFixed(2), inv.share_percent]
+    );
+  }
+
+  const bizRow = await pool.query('SELECT name FROM businesses WHERE id=$1', [business_id]);
+  await pool.query('INSERT INTO transactions (business_id, user_id, type, amount, description) VALUES ($1, $2, $3, $4, $5)',
+    [business_id, req.user.id, 'earning', total_amount, `Guadagno $${total_amount} registrato per ${bizRow.rows[0].name}`]);
+
+  res.json(earning);
+});
+
+app.delete('/api/earnings/:id', auth, adminOnly, async (req, res) => {
+  await pool.query('DELETE FROM earning_shares WHERE earning_id=$1', [req.params.id]);
+  await pool.query('DELETE FROM earnings WHERE id=$1', [req.params.id]);
+  res.json({ success: true });
+});
+
+// ─── WITHDRAWALS ──────────────────────────────────────────────────────────────
+app.get('/api/withdrawals', auth, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT w.*, u.username, b.name as business_name, b.icon as business_icon,
+      rb.username as recorded_by_name
+    FROM withdrawals w
+    JOIN users u ON u.id = w.user_id
+    JOIN businesses b ON b.id = w.business_id
+    LEFT JOIN users rb ON rb.id = w.recorded_by
+    ORDER BY w.created_at DESC
+  `);
+  res.json(rows);
+});
+
+app.post('/api/withdrawals', auth, adminOnly, async (req, res) => {
+  const { user_id, business_id, amount, note } = req.body;
+  if (!user_id || !business_id || !amount) return res.status(400).json({ error: 'Campi obbligatori mancanti' });
+
+  // Controlla che abbia abbastanza saldo
+  const { rows: [balance] } = await pool.query(`
+    SELECT 
+      COALESCE(SUM(es.amount), 0) as total_earned,
+      COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id=$1 AND w.business_id=$2), 0) as total_withdrawn
+    FROM earning_shares es WHERE es.user_id=$1 AND es.business_id=$2
+  `, [user_id, business_id]);
+
+  const available = Number(balance.total_earned) - Number(balance.total_withdrawn);
+  if (amount > available) return res.status(400).json({ error: `Saldo insufficiente. Disponibile: $${available.toFixed(2)}` });
+
+  const { rows } = await pool.query(
+    'INSERT INTO withdrawals (user_id, business_id, amount, note, recorded_by) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    [user_id, business_id, amount, note || '', req.user.id]
+  );
+
+  const userRow = await pool.query('SELECT username FROM users WHERE id=$1', [user_id]);
+  const bizRow = await pool.query('SELECT name FROM businesses WHERE id=$1', [business_id]);
+  await pool.query('INSERT INTO transactions (business_id, user_id, type, amount, description) VALUES ($1, $2, $3, $4, $5)',
+    [business_id, user_id, 'withdrawal', amount, `${userRow.rows[0].username} ha ritirato $${amount} da ${bizRow.rows[0].name}`]);
+
+  res.json(rows[0]);
+});
+
+app.delete('/api/withdrawals/:id', auth, adminOnly, async (req, res) => {
+  await pool.query('DELETE FROM withdrawals WHERE id=$1', [req.params.id]);
+  res.json({ success: true });
+});
+
 // ─── STATS ────────────────────────────────────────────────────────────────────
 app.get('/api/stats', auth, async (req, res) => {
   const totals = await pool.query(`
@@ -210,27 +335,50 @@ app.get('/api/stats', auth, async (req, res) => {
       COUNT(DISTINCT i.business_id) as total_businesses
     FROM investments i JOIN businesses b ON b.id = i.business_id WHERE b.active = true
   `);
-  const monthlyRevenue = await pool.query(`SELECT COALESCE(SUM(monthly_revenue), 0) as total_monthly FROM businesses WHERE active = true`);
-  const userShares = await pool.query(`
-    SELECT u.id as user_id, u.username, b.id as business_id, b.name as business_name, b.icon, b.monthly_revenue,
-      i_user.user_amount, b_total.business_total,
-      CASE WHEN b_total.business_total > 0 THEN (i_user.user_amount / b_total.business_total * 100) ELSE 0 END as share_percent,
-      CASE WHEN b_total.business_total > 0 THEN (i_user.user_amount / b_total.business_total * b.monthly_revenue) ELSE 0 END as monthly_earnings
-    FROM users u CROSS JOIN businesses b
-    JOIN (SELECT user_id, business_id, SUM(amount) as user_amount FROM investments GROUP BY user_id, business_id) i_user ON i_user.user_id = u.id AND i_user.business_id = b.id
-    JOIN (SELECT business_id, SUM(amount) as business_total FROM investments GROUP BY business_id) b_total ON b_total.business_id = b.id
-    WHERE b.active = true ORDER BY u.username, b.name
+  const totalEarnings = await pool.query(`SELECT COALESCE(SUM(total_amount), 0) as total FROM earnings`);
+
+  // Saldo per utente per business (guadagnato - ritirato)
+  const userBalances = await pool.query(`
+    SELECT 
+      u.id as user_id, u.username,
+      b.id as business_id, b.name as business_name, b.icon,
+      COALESCE(SUM(es.amount), 0) as total_earned,
+      COALESCE((
+        SELECT SUM(w.amount) FROM withdrawals w 
+        WHERE w.user_id = u.id AND w.business_id = b.id
+      ), 0) as total_withdrawn,
+      COALESCE(SUM(es.amount), 0) - COALESCE((
+        SELECT SUM(w.amount) FROM withdrawals w 
+        WHERE w.user_id = u.id AND w.business_id = b.id
+      ), 0) as available_balance
+    FROM users u
+    JOIN earning_shares es ON es.user_id = u.id
+    JOIN businesses b ON b.id = es.business_id
+    GROUP BY u.id, u.username, b.id, b.name, b.icon
+    ORDER BY u.username, b.name
   `);
+
+  // Totali per utente
   const userTotals = await pool.query(`
-    SELECT u.id, u.username, COALESCE(SUM(i.amount), 0) as total_invested,
-      COALESCE(SUM(CASE WHEN b_total.business_total > 0 THEN (i.amount / b_total.business_total * b.monthly_revenue) ELSE 0 END), 0) as total_monthly_earnings
+    SELECT 
+      u.id, u.username,
+      COALESCE(SUM(i.amount), 0) as total_invested,
+      COALESCE(SUM(es.amount), 0) as total_earned,
+      COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id = u.id), 0) as total_withdrawn,
+      COALESCE(SUM(es.amount), 0) - COALESCE((SELECT SUM(w.amount) FROM withdrawals w WHERE w.user_id = u.id), 0) as available_balance
     FROM users u
     LEFT JOIN investments i ON i.user_id = u.id
-    LEFT JOIN businesses b ON b.id = i.business_id AND b.active = true
-    LEFT JOIN (SELECT business_id, SUM(amount) as business_total FROM investments GROUP BY business_id) b_total ON b_total.business_id = i.business_id
-    GROUP BY u.id, u.username ORDER BY total_invested DESC
+    LEFT JOIN earning_shares es ON es.user_id = u.id
+    GROUP BY u.id, u.username
+    ORDER BY total_invested DESC
   `);
-  res.json({ totals: totals.rows[0], monthly_revenue: monthlyRevenue.rows[0].total_monthly, user_shares: userShares.rows, user_totals: userTotals.rows });
+
+  res.json({
+    totals: totals.rows[0],
+    total_earnings: totalEarnings.rows[0].total,
+    user_balances: userBalances.rows,
+    user_totals: userTotals.rows
+  });
 });
 
 // ─── TRANSACTIONS ─────────────────────────────────────────────────────────────
@@ -240,12 +388,12 @@ app.get('/api/transactions', auth, async (req, res) => {
     FROM transactions t
     LEFT JOIN users u ON u.id = t.user_id
     LEFT JOIN businesses b ON b.id = t.business_id
-    ORDER BY t.created_at DESC LIMIT 100
+    ORDER BY t.created_at DESC LIMIT 200
   `);
   res.json(rows);
 });
 
-// ─── SPA fallback (deve stare DOPO tutte le /api) ─────────────────────────────
+// ─── SPA fallback ─────────────────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(join(frontendPath, 'index.html'));
 });

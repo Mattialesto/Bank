@@ -24,6 +24,7 @@ export const api = {
   me: () => req('/auth/me'),
 
   getUsers: () => req('/users'),
+
   getBusinesses: () => req('/businesses'),
   createBusiness: (body) => req('/businesses', { method: 'POST', body: JSON.stringify(body) }),
   updateBusiness: (id, body) => req(`/businesses/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
@@ -32,6 +33,14 @@ export const api = {
   getInvestments: () => req('/investments'),
   addInvestment: (body) => req('/investments', { method: 'POST', body: JSON.stringify(body) }),
   deleteInvestment: (id) => req(`/investments/${id}`, { method: 'DELETE' }),
+
+  getEarnings: () => req('/earnings'),
+  addEarning: (body) => req('/earnings', { method: 'POST', body: JSON.stringify(body) }),
+  deleteEarning: (id) => req(`/earnings/${id}`, { method: 'DELETE' }),
+
+  getWithdrawals: () => req('/withdrawals'),
+  addWithdrawal: (body) => req('/withdrawals', { method: 'POST', body: JSON.stringify(body) }),
+  deleteWithdrawal: (id) => req(`/withdrawals/${id}`, { method: 'DELETE' }),
 
   getStats: () => req('/stats'),
   getTransactions: () => req('/transactions'),
