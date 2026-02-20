@@ -218,7 +218,23 @@ app.get('/api/users', auth, async (req, res) => {
     LEFT JOIN investments i ON i.user_id = u.id
     GROUP BY u.id ORDER BY total_invested DESC
   `);
-  const masked = await maskRows(rows, req.user, 'id', 'username', null);
+  // Admin: vede tutti
+  // Manager: vede i nomi degli investitori delle sue attività
+  // Member: vede solo se stesso
+  if (req.user.role === 'admin') return res.json(rows);
+  const managedBizIds = await getManagedBusinessIds(req.user.id);
+  let visibleUserIds = new Set([String(req.user.id)]);
+  if (managedBizIds.size > 0) {
+    const { rows: investors } = await pool.query(
+      `SELECT DISTINCT user_id FROM investments WHERE business_id = ANY($1::int[])`,
+      [[...managedBizIds].map(Number)]
+    );
+    investors.forEach(r => visibleUserIds.add(String(r.user_id)));
+  }
+  const masked = rows.map(u => ({
+    ...u,
+    username: visibleUserIds.has(String(u.id)) ? u.username : maskName(u.username, req.user.id, u.id, false)
+  }));
   res.json(masked);
 });
 
@@ -574,6 +590,27 @@ app.post('/api/businesses/:id/managers', auth, adminOnly, async (req, res) => {
 app.delete('/api/businesses/:id/managers/:uid', auth, adminOnly, async (req, res) => {
   await pool.query('DELETE FROM business_managers WHERE business_id=$1 AND user_id=$2', [req.params.id, req.params.uid]);
   res.json({ success: true });
+});
+
+// GET: users visible to me (for dropdowns in withdrawal modal)
+app.get('/api/my-visible-users', auth, async (req, res) => {
+  if (req.user.role === 'admin') {
+    const { rows } = await pool.query('SELECT id, username, role FROM users ORDER BY username');
+    return res.json(rows);
+  }
+  const managedBizIds = await getManagedBusinessIds(req.user.id);
+  if (managedBizIds.size === 0) {
+    const { rows } = await pool.query('SELECT id, username, role FROM users WHERE id=$1', [req.user.id]);
+    return res.json(rows);
+  }
+  const { rows } = await pool.query(`
+    SELECT DISTINCT u.id, u.username, u.role
+    FROM users u
+    JOIN investments i ON i.user_id = u.id
+    WHERE i.business_id = ANY($1::int[])
+    ORDER BY u.username
+  `, [[...managedBizIds].map(Number)]);
+  res.json(rows);
 });
 
 // GET: which businesses can I manage?

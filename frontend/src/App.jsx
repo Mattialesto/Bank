@@ -705,7 +705,7 @@ function WithdrawalsPage() {
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
-    const [w, s, u, b] = await Promise.all([api.getWithdrawals(), api.getStats(), api.getUsers(), api.getMyBusinesses()]);
+    const [w, s, u, b] = await Promise.all([api.getWithdrawals(), api.getStats(), api.getMyVisibleUsers(), api.getMyBusinesses()]);
     setWithdrawals(w); setStats(s); setUsers(u); setBusinesses(b); setLoading(false);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
