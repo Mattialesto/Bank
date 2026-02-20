@@ -364,6 +364,8 @@ function BusinessesPage() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editBiz, setEditBiz] = useState(null);
+  const [managerModal, setManagerModal] = useState(null); // business object
+  const [allUsers, setAllUsers] = useState([]);
   const [form, setForm] = useState({ name: '', description: '', icon: '🏢' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -391,6 +393,25 @@ function BusinessesPage() {
     await api.deleteBusiness(id); refresh();
   };
 
+  const openManagers = async (b) => {
+    const users = await api.getUsers();
+    setAllUsers(users);
+    setManagerModal(b);
+  };
+
+  const handleAddManager = async (userId) => {
+    try { await api.addBusinessManager(managerModal.id, { user_id: userId }); refresh(); openManagers({ ...managerModal }); }
+    catch (e) { alert(e.message); }
+  };
+
+  const handleRemoveManager = async (uid) => {
+    await api.removeBusinessManager(managerModal.id, uid);
+    refresh();
+    const updated = businesses.find(b => b.id === managerModal.id);
+    if (updated) setManagerModal(updated);
+    else setManagerModal(null);
+  };
+
   if (loading) return <div className="loading"><div className="spinner" /></div>;
 
   return (
@@ -409,9 +430,18 @@ function BusinessesPage() {
               <div className="biz-stats">
                 <div className="biz-stat"><label>Investito</label><p>{fmt(b.total_invested)}</p></div>
               </div>
+              {/* Managers badge */}
+              {b.managers && b.managers.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
+                  {b.managers.map(m => (
+                    <span key={m.user_id} className="chip chip-member" style={{ fontSize: 10 }}>⚙️ {m.username}</span>
+                  ))}
+                </div>
+              )}
               {user.role === 'admin' && (
-                <div className="biz-actions">
+                <div className="biz-actions" style={{ flexWrap: 'wrap' }}>
                   <button className="btn btn-secondary btn-sm" onClick={() => openEdit(b)}><Icon d={icons.edit} size={14} /> Modifica</button>
+                  <button className="btn btn-gold btn-sm" onClick={() => openManagers(b)}>⚙️ Manager</button>
                   <button className="btn btn-danger btn-sm" onClick={() => handleDelete(b.id)}><Icon d={icons.trash} size={14} /></button>
                 </div>
               )}
@@ -431,6 +461,47 @@ function BusinessesPage() {
             </div>
           </div>
           <div className="form-group"><label className="form-label">Descrizione</label><input className="form-input" placeholder="Breve descrizione..." value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} /></div>
+        </Modal>
+      )}
+
+      {/* Manager modal */}
+      {managerModal && (
+        <Modal title={`⚙️ Manager — ${managerModal.icon} ${managerModal.name}`} onClose={() => setManagerModal(null)}
+          footer={<button className="btn btn-secondary" onClick={() => setManagerModal(null)}>Chiudi</button>}>
+          <p style={{ color: 'var(--text2)', fontSize: 13, marginBottom: 16 }}>
+            I manager possono registrare guadagni e spese per questa attività.
+          </p>
+          {/* Current managers */}
+          {managerModal.managers && managerModal.managers.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div className="form-label" style={{ marginBottom: 8 }}>Manager attuali</div>
+              {managerModal.managers.map(m => (
+                <div key={m.user_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--surface2)', borderRadius: 8, marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div className="avatar" style={{ width: 28, height: 28, fontSize: 11 }}>{m.username[0].toUpperCase()}</div>
+                    <span style={{ fontWeight: 600 }}>{m.username}</span>
+                  </div>
+                  <button className="btn btn-danger btn-sm" onClick={() => handleRemoveManager(m.user_id)}><Icon d={icons.trash} size={13} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Add manager */}
+          <div className="form-label" style={{ marginBottom: 8 }}>Aggiungi manager</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {allUsers.filter(u => u.role !== 'admin' && !(managerModal.managers || []).find(m => m.user_id === u.id)).map(u => (
+              <div key={u.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--surface2)', borderRadius: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div className="avatar" style={{ width: 28, height: 28, fontSize: 11 }}>{u.username[0].toUpperCase()}</div>
+                  <span style={{ fontWeight: 600 }}>{u.username}</span>
+                </div>
+                <button className="btn btn-success btn-sm" onClick={() => handleAddManager(u.id)}><Icon d={icons.plus} size={13} /> Aggiungi</button>
+              </div>
+            ))}
+            {allUsers.filter(u => u.role !== 'admin' && !(managerModal.managers || []).find(m => m.user_id === u.id)).length === 0 && (
+              <p style={{ color: 'var(--text2)', fontSize: 13, textAlign: 'center', padding: 16 }}>Tutti i membri sono già manager</p>
+            )}
+          </div>
         </Modal>
       )}
     </>
@@ -526,7 +597,7 @@ function EarningsPage() {
   const [preview, setPreview] = useState(null);
 
   const refresh = useCallback(async () => {
-    const [e, b] = await Promise.all([api.getEarnings(), api.getBusinesses()]);
+    const [e, b] = await Promise.all([api.getEarnings(), api.getMyBusinesses()]);
     setEarnings(e); setBusinesses(b); setLoading(false);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -564,7 +635,7 @@ function EarningsPage() {
     <>
       <div className="page-header">
         <div className="page-header-text"><h1>⚡ Guadagni</h1><p>Registra i guadagni delle attività</p></div>
-        {user.role === 'admin' && <button className="btn btn-success" onClick={() => { setShowModal(true); setError(''); setPreview(null); }}><Icon d={icons.plus} size={16} /> Registra Guadagno</button>}
+        {(user.role === 'admin' || businesses.length > 0) && <button className="btn btn-success" onClick={() => { setShowModal(true); setError(''); setPreview(null); }}><Icon d={icons.plus} size={16} /> Registra Guadagno</button>}
       </div>
       <div className="card">
         <div className="table-wrap">
@@ -634,7 +705,7 @@ function WithdrawalsPage() {
   const [error, setError] = useState('');
 
   const refresh = useCallback(async () => {
-    const [w, s, u, b] = await Promise.all([api.getWithdrawals(), api.getStats(), api.getUsers(), api.getBusinesses()]);
+    const [w, s, u, b] = await Promise.all([api.getWithdrawals(), api.getStats(), api.getUsers(), api.getMyBusinesses()]);
     setWithdrawals(w); setStats(s); setUsers(u); setBusinesses(b); setLoading(false);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -661,11 +732,11 @@ function WithdrawalsPage() {
     <>
       <div className="page-header">
         <div className="page-header-text"><h1>🏧 Prelievi</h1><p>Gestisci i prelievi dei membri</p></div>
-        {user.role === 'admin' && <button className="btn btn-gold" onClick={() => { setShowModal(true); setError(''); }}><Icon d={icons.plus} size={16} /> Nuovo Prelievo</button>}
+        {(user.role === 'admin' || businesses.length > 0) && <button className="btn btn-gold" onClick={() => { setShowModal(true); setError(''); }}><Icon d={icons.plus} size={16} /> Nuovo Prelievo</button>}
       </div>
 
       {/* Saldi per membro */}
-      {stats?.user_balances && stats.user_balances.length > 0 && (
+      {stats?.user_balances && stats.user_balances.length > 0 && businesses.length > 0 && (
         <div className="card" style={{ marginBottom: 20 }}>
           <div className="card-header"><div className="card-title">💼 Saldi Disponibili per Membro</div></div>
           <div className="balance-grid">
@@ -711,7 +782,7 @@ function WithdrawalsPage() {
                   <td><span className="money-warn">{fmtDec(w.amount)}</span></td>
                   <td style={{ color: 'var(--text2)', fontSize: 12 }}>{w.note || '—'}</td>
                   <td style={{ color: 'var(--text2)', fontSize: 12, fontFamily: 'var(--mono)' }}>{fmtDate(w.created_at)}</td>
-                  {user.role === 'admin' && <td><button className="btn btn-danger btn-sm" onClick={() => handleDelete(w.id)}><Icon d={icons.trash} size={13} /></button></td>}
+                  {(user.role === 'admin' || businesses.find(b => String(b.id) === String(w.business_id))) && <td><button className="btn btn-danger btn-sm" onClick={() => handleDelete(w.id)}><Icon d={icons.trash} size={13} /></button></td>}
                 </tr>
               ))}
             </tbody>
@@ -835,7 +906,7 @@ function ExpensesPage() {
   const [preview, setPreview] = useState(null);
 
   const refresh = useCallback(async () => {
-    const [e, b] = await Promise.all([api.getExpenses(), api.getBusinesses()]);
+    const [e, b] = await Promise.all([api.getExpenses(), api.getMyBusinesses()]);
     setExpenses(e); setBusinesses(b); setLoading(false);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
@@ -878,7 +949,7 @@ function ExpensesPage() {
     <>
       <div className="page-header">
         <div className="page-header-text"><h1>💸 Spese</h1><p>Spese delle attività divise proporzionalmente</p></div>
-        {user.role === 'admin' && <button className="btn btn-danger" onClick={() => { setShowModal(true); setError(''); setPreview(null); }}><Icon d={icons.plus} size={16} /> Registra Spesa</button>}
+        {(user.role === 'admin' || businesses.length > 0) && <button className="btn btn-danger" onClick={() => { setShowModal(true); setError(''); setPreview(null); }}><Icon d={icons.plus} size={16} /> Registra Spesa</button>}
       </div>
 
       {/* Riepilogo spese per business */}
@@ -1030,7 +1101,8 @@ function MyProfilePage() {
                   </div>
                   <div className="balance-row"><label>Investito</label><span className="money">{fmt(b.invested)}</span></div>
                   <div className="balance-row"><label>Guadagnato</label><span style={{ fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--accent2)' }}>{fmtDec(b.total_earned)}</span></div>
-                  <div className="balance-row"><label>Ritirato</label><span className="money-warn">{fmtDec(b.total_withdrawn)}</span></div>
+                  <div className="balance-row"><label>Spese</label><span className="money-neg">-{fmtDec(b.total_expenses || 0)}</span></div>
+                  <div className="balance-row"><label>Ritirato</label><span className="money-warn">-{fmtDec(b.total_withdrawn)}</span></div>
                   <div className="balance-row"><label>Disponibile</label>
                     <span className={`balance-available ${Number(b.available_balance) === 0 ? 'zero' : ''}`}>{fmtDec(b.available_balance)}</span>
                   </div>

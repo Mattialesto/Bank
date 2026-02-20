@@ -49,5 +49,9 @@ export const api = {
 
   getStats: () => req('/stats'),
   getMyStats: () => req('/me/stats'),
+  getMyBusinesses: () => req('/my-businesses'),
+  getBusinessManagers: (id) => req(`/businesses/${id}/managers`),
+  addBusinessManager: (id, body) => req(`/businesses/${id}/managers`, { method: 'POST', body: JSON.stringify(body) }),
+  removeBusinessManager: (bizId, uid) => req(`/businesses/${bizId}/managers/${uid}`, { method: 'DELETE' }),
   getTransactions: () => req('/transactions'),
 };

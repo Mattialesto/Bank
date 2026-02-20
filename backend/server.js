@@ -104,6 +104,13 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS business_managers (
+      id SERIAL PRIMARY KEY,
+      business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(business_id, user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS transactions (
       id SERIAL PRIMARY KEY,
       business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
@@ -129,6 +136,19 @@ function auth(req, res, next) {
 
 function adminOnly(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  next();
+}
+
+// Controlla se l'utente è admin globale oppure manager di questo business
+async function canManageBusiness(req, res, next) {
+  if (req.user.role === 'admin') return next();
+  const bizId = req.params.id || req.body.business_id;
+  if (!bizId) return res.status(403).json({ error: 'Business non specificato' });
+  const { rows } = await pool.query(
+    'SELECT 1 FROM business_managers WHERE business_id=$1 AND user_id=$2',
+    [bizId, req.user.id]
+  );
+  if (rows.length === 0) return res.status(403).json({ error: 'Non sei manager di questa attività' });
   next();
 }
 
@@ -192,7 +212,12 @@ app.get('/api/users', auth, async (req, res) => {
 // ─── BUSINESSES ───────────────────────────────────────────────────────────────
 app.get('/api/businesses', auth, async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT b.*, COALESCE(SUM(i.amount), 0) as total_invested_real
+    SELECT b.*, COALESCE(SUM(i.amount), 0) as total_invested_real,
+      ARRAY(
+        SELECT jsonb_build_object('user_id', bm.user_id, 'username', u.username)
+        FROM business_managers bm JOIN users u ON u.id = bm.user_id
+        WHERE bm.business_id = b.id
+      ) as managers
     FROM businesses b
     LEFT JOIN investments i ON i.business_id = b.id
     WHERE b.active = true
@@ -277,7 +302,7 @@ app.get('/api/earnings', auth, async (req, res) => {
   })));
 });
 
-app.post('/api/earnings', auth, adminOnly, async (req, res) => {
+app.post('/api/earnings', auth, canManageBusiness, async (req, res) => {
   const { business_id, total_amount, note } = req.body;
   if (!business_id || !total_amount) return res.status(400).json({ error: 'business_id e total_amount richiesti' });
 
@@ -313,7 +338,7 @@ app.post('/api/earnings', auth, adminOnly, async (req, res) => {
   res.json(earning);
 });
 
-app.delete('/api/earnings/:id', auth, adminOnly, async (req, res) => {
+app.delete('/api/earnings/:id', auth, adminOnly, async (req, res) => {  // delete still admin-only
   await pool.query('DELETE FROM earning_shares WHERE earning_id=$1', [req.params.id]);
   await pool.query('DELETE FROM earnings WHERE id=$1', [req.params.id]);
   res.json({ success: true });
@@ -333,7 +358,7 @@ app.get('/api/withdrawals', auth, async (req, res) => {
   res.json(maskRows(rows, req.user));
 });
 
-app.post('/api/withdrawals', auth, adminOnly, async (req, res) => {
+app.post('/api/withdrawals', auth, canManageBusiness, async (req, res) => {
   const { user_id, business_id, amount, note } = req.body;
   if (!user_id || !business_id || !amount) return res.status(400).json({ error: 'Campi obbligatori mancanti' });
 
@@ -361,7 +386,17 @@ app.post('/api/withdrawals', auth, adminOnly, async (req, res) => {
   res.json(rows[0]);
 });
 
-app.delete('/api/withdrawals/:id', auth, adminOnly, async (req, res) => {
+app.delete('/api/withdrawals/:id', auth, async (req, res) => {
+  // Admin can delete any, manager can delete only from their business
+  const { rows } = await pool.query('SELECT * FROM withdrawals WHERE id=$1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+  if (req.user.role !== 'admin') {
+    const { rows: mgr } = await pool.query(
+      'SELECT 1 FROM business_managers WHERE business_id=$1 AND user_id=$2',
+      [rows[0].business_id, req.user.id]
+    );
+    if (mgr.length === 0) return res.status(403).json({ error: 'Non sei manager di questa attività' });
+  }
   await pool.query('DELETE FROM withdrawals WHERE id=$1', [req.params.id]);
   res.json({ success: true });
 });
@@ -454,7 +489,7 @@ app.get('/api/expenses', auth, async (req, res) => {
   })));
 });
 
-app.post('/api/expenses', auth, adminOnly, async (req, res) => {
+app.post('/api/expenses', auth, canManageBusiness, async (req, res) => {
   const { business_id, total_amount, description, note } = req.body;
   if (!business_id || !total_amount || !description) return res.status(400).json({ error: 'business_id, total_amount e description richiesti' });
 
@@ -491,6 +526,51 @@ app.delete('/api/expenses/:id', auth, adminOnly, async (req, res) => {
   await pool.query('DELETE FROM expense_shares WHERE expense_id=$1', [req.params.id]);
   await pool.query('DELETE FROM expenses WHERE id=$1', [req.params.id]);
   res.json({ success: true });
+});
+
+// ─── BUSINESS MANAGERS ────────────────────────────────────────────────────────
+// GET managers of a business
+app.get('/api/businesses/:id/managers', auth, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT bm.*, u.username FROM business_managers bm
+    JOIN users u ON u.id = bm.user_id
+    WHERE bm.business_id = $1
+  `, [req.params.id]);
+  res.json(rows);
+});
+
+// Add manager (admin only)
+app.post('/api/businesses/:id/managers', auth, adminOnly, async (req, res) => {
+  const { user_id } = req.body;
+  if (!user_id) return res.status(400).json({ error: 'user_id richiesto' });
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO business_managers (business_id, user_id) VALUES ($1, $2) RETURNING *',
+      [req.params.id, user_id]
+    );
+    res.json(rows[0]);
+  } catch { res.status(400).json({ error: 'Manager già assegnato' }); }
+});
+
+// Remove manager (admin only)
+app.delete('/api/businesses/:id/managers/:uid', auth, adminOnly, async (req, res) => {
+  await pool.query('DELETE FROM business_managers WHERE business_id=$1 AND user_id=$2', [req.params.id, req.params.uid]);
+  res.json({ success: true });
+});
+
+// GET: which businesses can I manage?
+app.get('/api/my-businesses', auth, async (req, res) => {
+  if (req.user.role === 'admin') {
+    const { rows } = await pool.query('SELECT * FROM businesses WHERE active=true ORDER BY name');
+    return res.json(rows);
+  }
+  const { rows } = await pool.query(`
+    SELECT b.* FROM businesses b
+    JOIN business_managers bm ON bm.business_id = b.id
+    WHERE bm.user_id = $1 AND b.active = true
+    ORDER BY b.name
+  `, [req.user.id]);
+  res.json(rows);
 });
 
 // ─── MY PROFILE ──────────────────────────────────────────────────────────────
@@ -538,14 +618,17 @@ app.get('/api/me/stats', auth, async (req, res) => {
     ORDER BY w.created_at DESC
   `, [uid]);
 
-  // Saldo per business
+  // Saldo per business (guadagnato - spese - ritirato)
   const balances = await pool.query(`
     SELECT 
       b.id as business_id, b.name as business_name, b.icon,
       COALESCE(inv.invested, 0) as invested,
       COALESCE(earned.total_earned, 0) as total_earned,
+      COALESCE(myexp.total_expenses, 0) as total_expenses,
       COALESCE(withdrawn.total_withdrawn, 0) as total_withdrawn,
-      COALESCE(earned.total_earned, 0) - COALESCE(withdrawn.total_withdrawn, 0) as available_balance,
+      COALESCE(earned.total_earned, 0)
+        - COALESCE(myexp.total_expenses, 0)
+        - COALESCE(withdrawn.total_withdrawn, 0) as available_balance,
       COALESCE(inv.invested, 0) / NULLIF(biz_total.total, 0) * 100 as share_percent
     FROM businesses b
     LEFT JOIN (SELECT business_id, SUM(amount) as invested FROM investments WHERE user_id=$1 GROUP BY business_id) inv ON inv.business_id = b.id
