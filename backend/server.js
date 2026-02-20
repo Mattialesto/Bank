@@ -152,18 +152,31 @@ async function canManageBusiness(req, res, next) {
   next();
 }
 
-// Censura il nome: prima lettera + asterischi, tranne per se stesso o per admin
-function maskName(username, requestingUserId, ownerId, isAdmin) {
-  if (isAdmin || requestingUserId === ownerId || !username) return username;
+// Censura il nome: prima lettera + asterischi, tranne per se stesso, admin o manager
+function maskName(username, requestingUserId, ownerId, canSee) {
+  if (canSee || requestingUserId === ownerId || !username) return username;
   return username[0].toUpperCase() + '*'.repeat(Math.max(username.length - 1, 3));
 }
 
-function maskRows(rows, requestingUser, userIdField = 'user_id', usernameField = 'username') {
+// Recupera le business_id di cui l'utente è manager
+async function getManagedBusinessIds(userId) {
+  const { rows } = await pool.query(
+    'SELECT business_id FROM business_managers WHERE user_id=$1', [userId]
+  );
+  return new Set(rows.map(r => String(r.business_id)));
+}
+
+async function maskRows(rows, requestingUser, userIdField = 'user_id', usernameField = 'username', bizIdField = 'business_id') {
   if (requestingUser.role === 'admin') return rows;
-  return rows.map(row => ({
-    ...row,
-    [usernameField]: maskName(row[usernameField], requestingUser.id, row[userIdField], false)
-  }));
+  const managedBizIds = await getManagedBusinessIds(requestingUser.id);
+  return rows.map(row => {
+    // Il manager vede i nomi degli investitori delle sue attività
+    const isManager = bizIdField && row[bizIdField] && managedBizIds.has(String(row[bizIdField]));
+    return {
+      ...row,
+      [usernameField]: maskName(row[usernameField], requestingUser.id, row[userIdField], isManager)
+    };
+  });
 }
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -205,7 +218,7 @@ app.get('/api/users', auth, async (req, res) => {
     LEFT JOIN investments i ON i.user_id = u.id
     GROUP BY u.id ORDER BY total_invested DESC
   `);
-  const masked = maskRows(rows, req.user, 'id', 'username');
+  const masked = await maskRows(rows, req.user, 'id', 'username', null);
   res.json(masked);
 });
 
@@ -260,7 +273,7 @@ app.get('/api/investments', auth, async (req, res) => {
     JOIN businesses b ON b.id = i.business_id
     ORDER BY i.created_at DESC
   `);
-  res.json(maskRows(rows, req.user));
+  res.json(await maskRows(rows, req.user));
 });
 
 app.post('/api/investments', auth, adminOnly, async (req, res) => {
@@ -295,11 +308,11 @@ app.get('/api/earnings', auth, async (req, res) => {
     LEFT JOIN users u ON u.id = e.recorded_by
     ORDER BY e.created_at DESC
   `);
-  // recorded_by_name: mostra solo ad admin (chi ha registrato non è info sensibile ma manteniamo coerenza)
-  res.json(rows.map(r => ({
-    ...r,
-    recorded_by_name: req.user.role === 'admin' ? r.recorded_by_name : (r.recorded_by === req.user.id ? r.recorded_by_name : null)
-  })));
+  const managedBizIds = req.user.role === 'admin' ? null : await getManagedBusinessIds(req.user.id);
+  res.json(rows.map(r => {
+    const canSee = req.user.role === 'admin' || r.recorded_by === req.user.id || (managedBizIds && managedBizIds.has(String(r.business_id)));
+    return { ...r, recorded_by_name: canSee ? r.recorded_by_name : null };
+  }));
 });
 
 app.post('/api/earnings', auth, canManageBusiness, async (req, res) => {
@@ -355,7 +368,7 @@ app.get('/api/withdrawals', auth, async (req, res) => {
     LEFT JOIN users rb ON rb.id = w.recorded_by
     ORDER BY w.created_at DESC
   `);
-  res.json(maskRows(rows, req.user));
+  res.json(await maskRows(rows, req.user));
 });
 
 app.post('/api/withdrawals', auth, canManageBusiness, async (req, res) => {
@@ -448,17 +461,21 @@ app.get('/api/stats', auth, async (req, res) => {
   `);
 
   const isAdmin = req.user.role === 'admin';
-  const maskStatRows = (rows) => rows.map(r => ({
-    ...r,
-    username: maskName(r.username, req.user.id, r.user_id || r.id, isAdmin)
-  }));
+  const managedBizIds = isAdmin ? new Set() : await getManagedBusinessIds(req.user.id);
+  const maskStatRows = (rows, hasBizId = false) => rows.map(r => {
+    const isManager = hasBizId && managedBizIds.has(String(r.business_id));
+    return {
+      ...r,
+      username: maskName(r.username, req.user.id, r.user_id || r.id, isAdmin || isManager)
+    };
+  });
 
   res.json({
     totals: totals.rows[0],
     total_earnings: totalEarnings.rows[0].total,
     total_expenses: totalExpenses.rows[0].total,
-    user_balances: maskStatRows(userBalances.rows),
-    user_totals: maskStatRows(userTotals.rows)
+    user_balances: maskStatRows(userBalances.rows, true),
+    user_totals: maskStatRows(userTotals.rows, false)
   });
 });
 
@@ -471,7 +488,7 @@ app.get('/api/transactions', auth, async (req, res) => {
     LEFT JOIN businesses b ON b.id = t.business_id
     ORDER BY t.created_at DESC LIMIT 200
   `);
-  res.json(maskRows(rows, req.user));
+  res.json(await maskRows(rows, req.user));
 });
 
 // ─── EXPENSES ────────────────────────────────────────────────────────────────
@@ -483,10 +500,11 @@ app.get('/api/expenses', auth, async (req, res) => {
     LEFT JOIN users u ON u.id = e.recorded_by
     ORDER BY e.created_at DESC
   `);
-  res.json(rows.map(r => ({
-    ...r,
-    recorded_by_name: req.user.role === 'admin' ? r.recorded_by_name : null
-  })));
+  const managedBizIdsExp = req.user.role === 'admin' ? null : await getManagedBusinessIds(req.user.id);
+  res.json(rows.map(r => {
+    const canSee = req.user.role === 'admin' || (managedBizIdsExp && managedBizIdsExp.has(String(r.business_id)));
+    return { ...r, recorded_by_name: canSee ? r.recorded_by_name : null };
+  }));
 });
 
 app.post('/api/expenses', auth, canManageBusiness, async (req, res) => {
